@@ -1,0 +1,57 @@
+"""pose_extract.py: video -> 33 landmarks/frame + joint angles -> JSON.
+Usage: python pose_extract.py input.mp4 output.json"""
+import json, sys
+import cv2
+import numpy as np
+import mediapipe as mp
+
+LM = mp.solutions.pose.PoseLandmark
+
+def angle(a, b, c) -> float:
+    """Angle at point b (degrees) formed by a-b-c, using x,y,z."""
+    ba, bc = np.asarray(a) - np.asarray(b), np.asarray(c) - np.asarray(b)
+    cosang = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-9)
+    return float(np.degrees(np.arccos(np.clip(cosang, -1.0, 1.0))))
+
+def pt(lms, idx):
+    l = lms[idx]
+    return [l.x, l.y, l.z]
+
+def extract(video_path: str) -> dict:
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frames = []
+    with mp.solutions.pose.Pose(model_complexity=2, smooth_landmarks=True,
+                                min_detection_confidence=0.5,
+                                min_tracking_confidence=0.5) as pose:
+        i = 0
+        while cap.isOpened():
+            ok, frame = cap.read()
+            if not ok:
+                break
+            res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if res.pose_landmarks:
+                lms = res.pose_landmarks.landmark
+                keypoints = [[round(l.x, 4), round(l.y, 4), round(l.z, 4), round(l.visibility, 3)] for l in lms]
+                angles = {
+                    "left_elbow":  angle(pt(lms, LM.LEFT_SHOULDER),  pt(lms, LM.LEFT_ELBOW),  pt(lms, LM.LEFT_WRIST)),
+                    "right_elbow": angle(pt(lms, LM.RIGHT_SHOULDER), pt(lms, LM.RIGHT_ELBOW), pt(lms, LM.RIGHT_WRIST)),
+                    "left_knee":   angle(pt(lms, LM.LEFT_HIP),  pt(lms, LM.LEFT_KNEE),  pt(lms, LM.LEFT_ANKLE)),
+                    "right_knee":  angle(pt(lms, LM.RIGHT_HIP), pt(lms, LM.RIGHT_KNEE), pt(lms, LM.RIGHT_ANKLE)),
+                }
+                frames.append({"frame": i, "t": round(i / fps, 4), "keypoints": keypoints,
+                               "angles": {k: round(v, 1) for k, v in angles.items()}})
+            else:
+                frames.append({"frame": i, "t": round(i / fps, 4), "keypoints": None, "angles": None})
+            i += 1
+    cap.release()
+    return {"video": video_path, "fps": fps, "n_frames": len(frames),
+            "landmark_order": [l.name for l in LM], "frames": frames}
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit("usage: python pose_extract.py input.mp4 output.json")
+    out = extract(sys.argv[1])
+    with open(sys.argv[2], "w") as f:
+        json.dump(out, f)
+    print(f"saved {out['n_frames']} frames -> {sys.argv[2]}")

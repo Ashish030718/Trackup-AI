@@ -1,0 +1,117 @@
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+
+enum Role { PLAYER COACH FAN ADMIN }
+enum Severity { LOW MEDIUM HIGH }
+enum FeedbackVerdict { CORRECT WRONG MISSED }
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  role         Role
+  playerId     String?  @unique        // link to canonical player (cricsheet id)
+  academyId    String?
+  createdAt    DateTime @default(now())
+  videos       VideoAnalysis[]
+  vrSessions   VRSession[]
+  feedback     AICoachFeedback[] @relation("CoachFeedback")
+}
+
+model Player {
+  id          String   @id            // cricsheet registry id or generated
+  fullName    String
+  aliases     String[]
+  battingHand String?
+  bowlingType String?
+  stats       PlayerStats[]
+}
+
+model MatchData {
+  id         String   @id             // cricsheet match id or academy id
+  source     String                   // CRICSHEET | LIVE | ACADEMY
+  format     String
+  venue      String?
+  date       DateTime
+  teams      String[]
+  result     Json?
+  balls      BallEvent[]
+  @@index([date, format])
+}
+
+model BallEvent {
+  id         BigInt  @id @default(autoincrement())
+  matchId    String
+  innings    Int
+  over       Int
+  ball       Int
+  batterId   String
+  bowlerId   String
+  runsBat    Int
+  extras     Int     @default(0)
+  wicket     Boolean @default(false)
+  speedKmh   Float?
+  match      MatchData @relation(fields: [matchId], references: [id])
+  @@unique([matchId, innings, over, ball])
+  @@index([batterId]) @@index([bowlerId])
+}
+
+model PlayerStats {
+  id         String   @id @default(cuid())
+  playerId   String
+  format     String
+  phase      String   // POWERPLAY | MIDDLE | DEATH | ALL
+  balls      Int
+  runs       Int
+  dismissals Int
+  strikeRate Float
+  average    Float?
+  economy    Float?
+  updatedAt  DateTime @updatedAt
+  player     Player   @relation(fields: [playerId], references: [id])
+  @@unique([playerId, format, phase])
+}
+
+model VideoAnalysis {
+  id          String   @id @default(cuid())
+  userId      String
+  videoUrl    String
+  poseUrl     String?                  // s3 path to [T,33,4] array
+  shotType    String?
+  status      String   @default("QUEUED") // QUEUED | PROCESSING | DONE | FAILED
+  metrics     Json?                    // bat speed, balance index, angles, timing
+  findings    Json?                    // [{ruleId, frameStart, frameEnd, severity, confidence}]
+  ruleVersion String?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id])
+  feedback    AICoachFeedback[]
+}
+
+model VRSession {
+  id           String   @id @default(cuid())
+  userId       String
+  scenario     String
+  deviceInfo   Json?
+  avgLatencyMs Float?
+  shots        Json                    // per-delivery: type, shot, outcome, reactionMs, batSpeed
+  summary      Json?
+  startedAt    DateTime @default(now())
+  endedAt      DateTime?
+  user         User     @relation(fields: [userId], references: [id])
+}
+
+model AICoachFeedback {
+  id          String          @id @default(cuid())
+  analysisId  String
+  coachId     String
+  findingId   String?
+  verdict     FeedbackVerdict
+  correctedLabel String?
+  severity    Severity?
+  frameStart  Int?
+  frameEnd    Int?
+  comment     String?
+  createdAt   DateTime @default(now())
+  analysis    VideoAnalysis   @relation(fields: [analysisId], references: [id])
+  coach       User            @relation("CoachFeedback", fields: [coachId], references: [id])
+}

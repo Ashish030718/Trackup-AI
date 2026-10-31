@@ -1,0 +1,80 @@
+"""parse_cricsheet.py: Cricsheet JSON -> clean ball-by-ball DataFrame + normalized stats."""
+import json, sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+def parse_match(path: Path) -> pd.DataFrame:
+    d = json.loads(path.read_text(encoding="utf-8"))
+    info = d.get("info", {})
+    people = info.get("registry", {}).get("people", {})   # name -> canonical id
+    rows = []
+    for inn_no, inn in enumerate(d.get("innings", []), start=1):
+        for ov in inn.get("overs", []):
+            for b_no, de in enumerate(ov.get("deliveries", []), start=1):
+                runs = de.get("runs", {})
+                extras = de.get("extras", {})
+                rows.append({
+                    "match_id": path.stem,
+                    "date": (info.get("dates") or [None])[0],
+                    "format": info.get("match_type"),
+                    "venue": info.get("venue"),
+                    "innings": inn_no,
+                    "team": inn.get("team"),
+                    "over": ov["over"],
+                    "ball": b_no,
+                    "batter": de.get("batter"),
+                    "batter_id": people.get(de.get("batter")),
+                    "bowler": de.get("bowler"),
+                    "bowler_id": people.get(de.get("bowler")),
+                    "runs_bat": runs.get("batter", 0),
+                    "runs_total": runs.get("total", 0),
+                    "is_wide": "wides" in extras,
+                    "is_noball": "noballs" in extras,
+                    "wicket": len(de.get("wickets", [])) > 0,
+                })
+    return pd.DataFrame(rows)
+
+def load_dir(folder: str) -> pd.DataFrame:
+    frames = []
+    for p in Path(folder).glob("*.json"):
+        try:
+            frames.append(parse_match(p))
+        except Exception as e:                      # keep going, log bad files
+            print(f"skip {p.name}: {e}", file=sys.stderr)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+def clean(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["match_id", "batter", "bowler", "over"])
+    # fall back to normalized name when no registry id exists
+    for col in ("batter", "bowler"):
+        key = df[f"{col}_id"].fillna(df[col].str.lower().str.replace(r"[^a-z ]", "", regex=True))
+        df[f"{col}_key"] = key
+    df["legal_ball"] = ~(df["is_wide"] | df["is_noball"])
+    df["phase"] = pd.cut(df["over"], bins=[-1, 5, 14, 99], labels=["POWERPLAY", "MIDDLE", "DEATH"])
+    return df
+
+def batting_stats(df: pd.DataFrame, k: int = 30, prior_sr: float = 125.0) -> pd.DataFrame:
+    g = df.groupby(["batter_key", "format", "phase"], observed=True).agg(
+        balls=("legal_ball", "sum"), runs=("runs_bat", "sum"), dismissals=("wicket", "sum")).reset_index()
+    g["strike_rate"] = np.where(g["balls"] > 0, g["runs"] / g["balls"] * 100, np.nan)
+    # Bayesian shrinkage so tiny samples don't dominate
+    g["sr_shrunk"] = (g["runs"] + k * prior_sr / 100) / (g["balls"] + k) * 100
+    g["average"] = np.where(g["dismissals"] > 0, g["runs"] / g["dismissals"], np.nan)
+    return g
+
+def bowling_stats(df: pd.DataFrame) -> pd.DataFrame:
+    g = df.groupby(["bowler_key", "format", "phase"], observed=True).agg(
+        balls=("legal_ball", "sum"), runs=("runs_total", "sum"), wickets=("wicket", "sum")).reset_index()
+    g["economy"] = np.where(g["balls"] > 0, g["runs"] / (g["balls"] / 6), np.nan)
+    return g
+
+if __name__ == "__main__":
+    raw = load_dir(sys.argv[1] if len(sys.argv) > 1 else "cricsheet_json")
+    data = clean(raw)
+    data.to_parquet("balls_clean.parquet")
+    batting_stats(data).to_parquet("batting_stats.parquet")
+    bowling_stats(data).to_parquet("bowling_stats.parquet")
+    print(f"{len(data):,} deliveries processed")
